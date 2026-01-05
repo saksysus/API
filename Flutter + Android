@@ -1,0 +1,240 @@
+✅ SmartSight - Flutter + Android (JSON-based)
+🔹 What This Implementation Does
+✔ Uses OS permission only
+✔ Automatically collects usage data
+✔ Converts everything into structured JSON
+✔ Sends JSON to UserStateManager API
+✔ Backend never touches the phone
+________________________________________
+🧱 Updated Architecture (Same Logic, Correct Name)
+User
+ ↓
+SmartSight Flutter App
+ ↓ (MethodChannel)
+Android UsageStatsManager
+ ↓
+JSON Usage Summary
+ ↓ (REST API)
+UserStateManager API
+ ↓
+Analytics Engine
+ ↓
+JSON Insights Output
+________________________________________
+1️⃣ Flutter Side (JSON-Centric)
+📦 pubspec.yaml
+dependencies:
+  flutter:
+    sdk: flutter
+  http: ^1.1.0
+________________________________________
+📱 main.dart (SmartSight)
+import 'dart:convert';
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:http/http.dart' as http;
+
+void main() {
+  runApp(const SmartSightApp());
+}
+
+class SmartSightApp extends StatelessWidget {
+  const SmartSightApp({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return const MaterialApp(
+      home: UsageScreen(),
+    );
+  }
+}
+
+class UsageScreen extends StatefulWidget {
+  const UsageScreen({super.key});
+
+  @override
+  State<UsageScreen> createState() => _UsageScreenState();
+}
+
+class _UsageScreenState extends State<UsageScreen> {
+  static const platform =
+      MethodChannel('smartsight/usage_stats');
+
+  String output = "No data yet";
+
+  Future<void> collectUsage() async {
+    try {
+      final Map usage =
+          await platform.invokeMethod('getUsageStats');
+
+      final jsonPayload = {
+        "metadata": {
+          "schema_version": "1.0",
+          "source": "SmartSight Mobile",
+          "generated_at_utc": DateTime.now().toUtc().toIso8601String()
+        },
+        "user_id": "uuid",
+        "device_id": "hashed_device_id",
+        "time_window": "last_24_hours",
+        "app_usage": usage["apps"]
+      };
+
+      setState(() {
+        output = jsonEncode(jsonPayload);
+      });
+
+      await sendToBackend(jsonPayload);
+    } catch (e) {
+      setState(() {
+        output = "Permission denied or error";
+      });
+    }
+  }
+
+  Future<void> sendToBackend(Map<String, dynamic> json) async {
+    await http.post(
+      Uri.parse("https://api.smartsight.com/usage/ingest"),
+      headers: {"Content-Type": "application/json"},
+      body: jsonEncode(json),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text("SmartSight")),
+      body: Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            ElevatedButton(
+              onPressed: collectUsage,
+              child: const Text("Grant Access & Scan"),
+            ),
+            Padding(
+              padding: const EdgeInsets.all(16),
+              child: Text(output),
+            )
+          ],
+        ),
+      ),
+    );
+  }
+}
+________________________________________
+2️⃣ Android Native (Kotlin) — SmartSight
+📁 AndroidManifest.xml
+<uses-permission
+    android:name="android.permission.PACKAGE_USAGE_STATS"
+    tools:ignore="ProtectedPermissions" />
+________________________________________
+📁 MainActivity.kt
+package com.example.smartsight
+
+import android.app.usage.UsageStatsManager
+import android.content.Context
+import android.content.Intent
+import android.provider.Settings
+import io.flutter.embedding.android.FlutterActivity
+import io.flutter.embedding.engine.FlutterEngine
+import io.flutter.plugin.common.MethodChannel
+
+class MainActivity : FlutterActivity() {
+
+    private val CHANNEL = "smartsight/usage_stats"
+
+    override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
+        super.configureFlutterEngine(flutterEngine)
+
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL)
+            .setMethodCallHandler { call, result ->
+
+                if (call.method == "getUsageStats") {
+                    if (!hasUsagePermission()) {
+                        startActivity(
+                            Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS)
+                        )
+                        result.error("NO_PERMISSION", "Usage access not granted", null)
+                        return@setMethodCallHandler
+                    }
+
+                    result.success(collectUsageStats())
+                }
+            }
+    }
+
+    private fun hasUsagePermission(): Boolean {
+        val appOps = getSystemService(Context.APP_OPS_SERVICE)
+                as android.app.AppOpsManager
+        val mode = appOps.checkOpNoThrow(
+            "android:get_usage_stats",
+            android.os.Process.myUid(),
+            packageName
+        )
+        return mode == android.app.AppOpsManager.MODE_ALLOWED
+    }
+
+    private fun collectUsageStats(): Map<String, Any> {
+        val manager =
+            getSystemService(Context.USAGE_STATS_SERVICE)
+                    as UsageStatsManager
+
+        val end = System.currentTimeMillis()
+        val start = end - 24 * 60 * 60 * 1000
+
+        val stats = manager.queryUsageStats(
+            UsageStatsManager.INTERVAL_DAILY,
+            start,
+            end
+        )
+
+        val apps = mutableListOf<Map<String, Any>>()
+
+        for (s in stats) {
+            if (s.totalTimeInForeground > 0) {
+                apps.add(
+                    mapOf(
+                        "package" to s.packageName,
+                        "minutes" to (s.totalTimeInForeground / 60000),
+                        "last_used" to s.lastTimeUsed
+                    )
+                )
+            }
+        }
+
+        return mapOf("apps" to apps)
+    }
+}
+________________________________________
+3️⃣ JSON Output Example (What Your API Receives)
+{
+  "metadata": {
+    "schema_version": "1.0",
+    "source": "SmartSight Mobile",
+    "generated_at_utc": "2025-01-12T10:45:30Z"
+  },
+  "user_id": "uuid",
+  "device_id": "hashed_device_id",
+  "time_window": "last_24_hours",
+  "app_usage": [
+    {
+      "package": "com.instagram.android",
+      "minutes": 95,
+      "last_used": 1736662800000
+    }
+  ]
+}
+✔ Raw → structured
+✔ JSON-only
+✔ Matches your UserStateManager API
+________________________________________
+4️⃣ Why This Is Correct (Final Validation)
+✔ SmartSight name everywhere
+✔ JSON-first pipeline
+✔ No spying
+✔ OS-level permission
+✔ Backend only processes JSON
+✔ Scales to AI & analytics
+This is exactly how real digital wellbeing apps are built.
+________________________________________
+
